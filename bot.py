@@ -1,25 +1,29 @@
 import os
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 
 
-# =========================
-# НАСТРОЙКИ
-# =========================
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHANNEL = os.environ["CHANNEL"]
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL = os.environ.get("CHANNEL")
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Фото пользователей
+photos = {}
+
+# Карусели, которые уже опубликованы
+carousels = {}
 
 
-# =========================
-# ПРОСТОЙ HTTP-СЕРВЕР ДЛЯ RENDER
-# =========================
+# =========================================================
+# HTTP-СЕРВЕР ДЛЯ RENDER
+# =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -31,127 +35,312 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    port = int(os.environ.get("PORT", "10000"))
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
+
     print(f"HTTP server started on port {port}")
+
     server.serve_forever()
 
 
-# =========================
+# =========================================================
 # TELEGRAM API
-# =========================
+# =========================================================
 
 def telegram(method, data=None):
-    url = f"{API_URL}/{method}"
 
     response = requests.post(
-        url,
+        f"{API}/{method}",
         data=data or {},
         timeout=60
     )
 
     response.raise_for_status()
-    return response.json()
+
+    result = response.json()
+
+    if not result.get("ok"):
+        raise Exception(result)
+
+    return result["result"]
 
 
-def send_message(chat_id, text):
-    telegram(
-        "sendMessage",
-        {
-            "chat_id": chat_id,
-            "text": text
-        }
-    )
+def send_message(chat_id, text, reply_markup=None):
+
+    data = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+
+    return telegram("sendMessage", data)
 
 
-def send_media_group(chat_id, media):
+def answer_callback(callback_id):
+
     return telegram(
-        "sendMediaGroup",
+        "answerCallbackQuery",
         {
-            "chat_id": chat_id,
-            "media": __import__("json").dumps(media)
+            "callback_query_id": callback_id
         }
     )
 
 
-# =========================
-# ХРАНЕНИЕ ФОТО
-# =========================
+def edit_message_media(
+    chat_id,
+    message_id,
+    file_id,
+    caption,
+    reply_markup
+):
 
-photos = {}
+    media = {
+        "type": "photo",
+        "media": file_id,
+        "caption": caption
+    }
+
+    return telegram(
+        "editMessageMedia",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": json.dumps(media),
+            "reply_markup": json.dumps(reply_markup)
+        }
+    )
 
 
-# =========================
-# ПОЛУЧЕНИЕ FILE_ID
-# =========================
+# =========================================================
+# КНОПКИ КАРУСЕЛИ
+# =========================================================
 
-def get_photo_file_id(message):
-    photo = message.get("photo")
+def carousel_keyboard(carousel_id, index, total):
 
-    if not photo:
-        return None
+    buttons = []
 
-    # Берём фотографию максимального качества
-    return photo[-1]["file_id"]
+    if index > 0:
+        buttons.append(
+            {
+                "text": "⬅️",
+                "callback_data": f"prev:{carousel_id}"
+            }
+        )
+
+    buttons.append(
+        {
+            "text": f"{index + 1} / {total}",
+            "callback_data": f"info:{carousel_id}"
+        }
+    )
+
+    if index < total - 1:
+        buttons.append(
+            {
+                "text": "➡️",
+                "callback_data": f"next:{carousel_id}"
+            }
+        )
+
+    return {
+        "inline_keyboard": [
+            buttons
+        ]
+    }
 
 
-# =========================
-# ПУБЛИКАЦИЯ КАРУСЕЛИ
-# =========================
+# =========================================================
+# СОЗДАНИЕ КАРУСЕЛИ
+# =========================================================
 
-def publish_carousel(chat_id):
+def publish_carousel(user_chat_id):
 
-    user_photos = photos.get(chat_id, [])
+    user_photos = photos.get(user_chat_id, [])
 
     if len(user_photos) < 2:
         send_message(
-            chat_id,
-            "Для карусели нужно минимум 2 фотографии."
+            user_chat_id,
+            "Нужно минимум 2 фотографии."
         )
         return
 
     if len(user_photos) > 9:
         user_photos = user_photos[:9]
 
-    media = []
+    # Уникальный ID карусели
+    import time
 
-    for i, file_id in enumerate(user_photos):
-        item = {
-            "type": "photo",
-            "media": file_id
-        }
+    carousel_id = str(
+        int(time.time() * 1000)
+    )
 
-        if i == 0:
-            item["caption"] = " "
-        else:
-            item["caption"] = ""
+    carousels[carousel_id] = {
+        "photos": user_photos,
+        "index": 0
+    }
 
-        media.append(item)
+    first_photo = user_photos[0]
+
+    caption = (
+        f"📸 1 / {len(user_photos)}"
+    )
+
+    keyboard = carousel_keyboard(
+        carousel_id,
+        0,
+        len(user_photos)
+    )
 
     try:
-        send_media_group(CHANNEL, media)
 
-        send_message(
-            chat_id,
-            f"Готово! Опубликовано фотографий: {len(media)}."
+        result = telegram(
+            "sendPhoto",
+            {
+                "chat_id": CHANNEL,
+                "photo": first_photo,
+                "caption": caption,
+                "reply_markup": json.dumps(keyboard)
+            }
         )
 
-        photos[chat_id] = []
+        # Сохраняем ID сообщения в канале
+        carousels[carousel_id]["message_id"] = result["message_id"]
+
+        send_message(
+            user_chat_id,
+            "✅ Карусель опубликована!\n\n"
+            f"Фотографий: {len(user_photos)}\n"
+            "В канале используй кнопки ⬅️ ➡️ для перелистывания."
+        )
+
+        # Очищаем фотографии пользователя
+        photos[user_chat_id] = []
 
     except Exception as e:
-        print("Ошибка публикации:", e)
+
+        print("Publish error:", e)
 
         send_message(
-            chat_id,
-            "Не удалось опубликовать карусель. Проверь, что бот является администратором канала."
+            user_chat_id,
+            "❌ Не удалось опубликовать карусель.\n\n"
+            "Проверь, что бот является администратором канала."
         )
 
 
-# =========================
+# =========================================================
+# ПЕРЕЛИСТЫВАНИЕ
+# =========================================================
+
+def change_carousel(callback_query):
+
+    callback_id = callback_query["id"]
+
+    data = callback_query.get("data", "")
+
+    message = callback_query.get("message")
+
+    if not message:
+        answer_callback(callback_id)
+        return
+
+    parts = data.split(":")
+
+    if len(parts) != 2:
+        answer_callback(callback_id)
+        return
+
+    action = parts[0]
+    carousel_id = parts[1]
+
+    carousel = carousels.get(carousel_id)
+
+    if not carousel:
+        answer_callback(callback_id)
+        return
+
+    photos_list = carousel["photos"]
+
+    current_index = carousel["index"]
+
+    if action == "next":
+
+        if current_index < len(photos_list) - 1:
+            current_index += 1
+
+    elif action == "prev":
+
+        if current_index > 0:
+            current_index -= 1
+
+    elif action == "info":
+
+        answer_callback(
+            callback_id
+        )
+
+        return
+
+    carousel["index"] = current_index
+
+    file_id = photos_list[current_index]
+
+    caption = (
+        f"📸 {current_index + 1} / "
+        f"{len(photos_list)}"
+    )
+
+    keyboard = carousel_keyboard(
+        carousel_id,
+        current_index,
+        len(photos_list)
+    )
+
+    try:
+
+        edit_message_media(
+            CHANNEL,
+            message["message_id"],
+            file_id,
+            caption,
+            keyboard
+        )
+
+    except Exception as e:
+
+        print("Carousel edit error:", e)
+
+    answer_callback(callback_id)
+
+
+# =========================================================
 # ОБРАБОТКА СООБЩЕНИЙ
-# =========================
+# =========================================================
 
 def process_update(update):
+
+    # -----------------------------------------------------
+    # КНОПКА КАРУСЕЛИ
+    # -----------------------------------------------------
+
+    callback_query = update.get("callback_query")
+
+    if callback_query:
+
+        change_carousel(
+            callback_query
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ОБЫЧНОЕ СООБЩЕНИЕ
+    # -----------------------------------------------------
 
     message = update.get("message")
 
@@ -162,63 +351,99 @@ def process_update(update):
 
     text = message.get("text", "")
 
-    # Команда START
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
+
     if text == "/start":
-        photos.setdefault(chat_id, [])
+
+        photos.setdefault(
+            chat_id,
+            []
+        )
 
         send_message(
             chat_id,
-            "Привет! 👋\n\n"
-            "Отправь мне от 2 до 9 фотографий.\n"
-            "После этого напиши /publish — и я опубликую их одной каруселью в канале."
+            "👋 Привет!\n\n"
+            "Отправь от 2 до 9 фотографий.\n\n"
+            "После этого напиши /publish.\n\n"
+            "Я опубликую их как одну карусель "
+            "с кнопками ⬅️ ➡️."
         )
+
         return
 
-    # Команда очистки
+    # -----------------------------------------------------
+    # CLEAR
+    # -----------------------------------------------------
+
     if text == "/clear":
+
         photos[chat_id] = []
 
         send_message(
             chat_id,
-            "Фотографии очищены. Можешь начать новую карусель."
+            "🗑 Фотографии очищены."
         )
+
         return
 
-    # Команда публикации
+    # -----------------------------------------------------
+    # PUBLISH
+    # -----------------------------------------------------
+
     if text == "/publish":
-        publish_carousel(chat_id)
+
+        publish_carousel(
+            chat_id
+        )
+
         return
 
-    # Получили фотографию
-    file_id = get_photo_file_id(message)
+    # -----------------------------------------------------
+    # ФОТО
+    # -----------------------------------------------------
 
-    if file_id:
+    if message.get("photo"):
 
-        photos.setdefault(chat_id, [])
+        photos.setdefault(
+            chat_id,
+            []
+        )
 
         if len(photos[chat_id]) >= 9:
+
             send_message(
                 chat_id,
-                "Максимум 9 фотографий. Напиши /publish для публикации."
+                "⚠️ Максимум 9 фотографий."
             )
+
             return
 
-        photos[chat_id].append(file_id)
+        # Берём самое большое доступное фото
+        file_id = message["photo"][-1]["file_id"]
 
-        count = len(photos[chat_id])
+        photos[chat_id].append(
+            file_id
+        )
+
+        count = len(
+            photos[chat_id]
+        )
 
         send_message(
             chat_id,
-            f"Фото добавлено: {count}/9\n\n"
-            "Можешь отправить ещё фотографии или написать /publish."
+            f"📷 Фото добавлено: {count}/9\n\n"
+            "Можешь отправить ещё фотографии "
+            "или написать /publish."
         )
 
         return
 
 
-# =========================
-# ЗАПУСК LONG POLLING
-# =========================
+# =========================================================
+# ПОЛУЧЕНИЕ ОБНОВЛЕНИЙ
+# =========================================================
 
 def run_bot():
 
@@ -230,17 +455,20 @@ def run_bot():
 
         try:
 
-            data = {
+            params = {
                 "timeout": 30,
-                "allowed_updates": ["message"]
+                "allowed_updates": [
+                    "message",
+                    "callback_query"
+                ]
             }
 
             if offset is not None:
-                data["offset"] = offset
+                params["offset"] = offset
 
             response = requests.get(
-                f"{API_URL}/getUpdates",
-                params=data,
+                f"{API}/getUpdates",
+                params=params,
                 timeout=40
             )
 
@@ -249,34 +477,49 @@ def run_bot():
             result = response.json()
 
             if not result.get("ok"):
-                print("Telegram API error:", result)
+
+                print(
+                    "Telegram API error:",
+                    result
+                )
+
                 continue
 
-            for update in result.get("result", []):
+            for update in result.get(
+                "result",
+                []
+            ):
 
-                offset = update["update_id"] + 1
+                offset = (
+                    update["update_id"] + 1
+                )
 
                 try:
-                    process_update(update)
+
+                    process_update(
+                        update
+                    )
+
                 except Exception as e:
-                    print("Update error:", e)
+
+                    print(
+                        "Update processing error:",
+                        e
+                    )
 
         except Exception as e:
 
-            print("Connection error:", e)
+            print(
+                "Connection error:",
+                e
+            )
 
 
-# =========================
-# MAIN
-# =========================
+# =========================================================
+# ЗАПУСК
+# =========================================================
 
 if __name__ == "__main__":
-
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is not set")
-
-    if not CHANNEL:
-        raise RuntimeError("CHANNEL is not set")
 
     web_thread = threading.Thread(
         target=start_web_server,
