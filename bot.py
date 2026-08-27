@@ -1,20 +1,44 @@
 import os
 import json
 import threading
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 
+
+# =========================================================
+# НАСТРОЙКИ
+# =========================================================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL"]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Фото пользователей
+# Москва
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+# Максимум фотографий
+MAX_PHOTOS = 9
+
+
+# =========================================================
+# ДАННЫЕ
+# =========================================================
+
+# Фото, которые пользователь сейчас собирает
 photos = {}
 
-# Карусели, которые уже опубликованы
+# Состояние ожидания даты
+schedule_waiting = set()
+
+# Запланированные публикации
+scheduled_posts = []
+
+# Уже опубликованные карусели
 carousels = {}
 
 
@@ -28,21 +52,28 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Telegram carousel bot is running")
+        self.wfile.write(
+            b"Telegram carousel bot is running"
+        )
 
     def log_message(self, format, *args):
         pass
 
 
 def start_web_server():
-    port = int(os.environ.get("PORT", "10000"))
+
+    port = int(
+        os.environ.get("PORT", "10000")
+    )
 
     server = HTTPServer(
         ("0.0.0.0", port),
         HealthHandler
     )
 
-    print(f"HTTP server started on port {port}")
+    print(
+        f"HTTP server started on port {port}"
+    )
 
     server.serve_forever()
 
@@ -69,7 +100,11 @@ def telegram(method, data=None):
     return result["result"]
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(
+    chat_id,
+    text,
+    reply_markup=None
+):
 
     data = {
         "chat_id": chat_id,
@@ -77,9 +112,14 @@ def send_message(chat_id, text, reply_markup=None):
     }
 
     if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
+        data["reply_markup"] = json.dumps(
+            reply_markup
+        )
 
-    return telegram("sendMessage", data)
+    return telegram(
+        "sendMessage",
+        data
+    )
 
 
 def answer_callback(callback_id):
@@ -88,6 +128,26 @@ def answer_callback(callback_id):
         "answerCallbackQuery",
         {
             "callback_query_id": callback_id
+        }
+    )
+
+
+def send_photo(
+    chat_id,
+    photo,
+    caption,
+    reply_markup
+):
+
+    return telegram(
+        "sendPhoto",
+        {
+            "chat_id": chat_id,
+            "photo": photo,
+            "caption": caption,
+            "reply_markup": json.dumps(
+                reply_markup
+            )
         }
     )
 
@@ -112,7 +172,9 @@ def edit_message_media(
             "chat_id": chat_id,
             "message_id": message_id,
             "media": json.dumps(media),
-            "reply_markup": json.dumps(reply_markup)
+            "reply_markup": json.dumps(
+                reply_markup
+            )
         }
     )
 
@@ -121,7 +183,11 @@ def edit_message_media(
 # КНОПКИ КАРУСЕЛИ
 # =========================================================
 
-def carousel_keyboard(carousel_id, index, total):
+def carousel_keyboard(
+    carousel_id,
+    index,
+    total
+):
 
     buttons = []
 
@@ -129,14 +195,16 @@ def carousel_keyboard(carousel_id, index, total):
         buttons.append(
             {
                 "text": "⬅️",
-                "callback_data": f"prev:{carousel_id}"
+                "callback_data":
+                    f"prev:{carousel_id}"
             }
         )
 
     buttons.append(
         {
             "text": f"{index + 1} / {total}",
-            "callback_data": f"info:{carousel_id}"
+            "callback_data":
+                f"info:{carousel_id}"
         }
     )
 
@@ -144,7 +212,8 @@ def carousel_keyboard(carousel_id, index, total):
         buttons.append(
             {
                 "text": "➡️",
-                "callback_data": f"next:{carousel_id}"
+                "callback_data":
+                    f"next:{carousel_id}"
             }
         )
 
@@ -156,36 +225,43 @@ def carousel_keyboard(carousel_id, index, total):
 
 
 # =========================================================
-# СОЗДАНИЕ КАРУСЕЛИ
+# ПУБЛИКАЦИЯ КАРУСЕЛИ
 # =========================================================
 
-def publish_carousel(user_chat_id):
+def publish_carousel(
+    user_chat_id,
+    user_photos=None
+):
 
-    user_photos = photos.get(user_chat_id, [])
+    if user_photos is None:
+        user_photos = photos.get(
+            user_chat_id,
+            []
+        )
 
     if len(user_photos) < 2:
+
         send_message(
             user_chat_id,
-            "Нужно минимум 2 фотографии."
+            "❌ Нужно минимум 2 фотографии."
         )
+
         return
 
-    if len(user_photos) > 9:
-        user_photos = user_photos[:9]
+    if len(user_photos) > MAX_PHOTOS:
 
-    # Уникальный ID карусели
-    import time
+        user_photos = user_photos[
+            :MAX_PHOTOS
+        ]
 
     carousel_id = str(
         int(time.time() * 1000)
     )
 
     carousels[carousel_id] = {
-        "photos": user_photos,
+        "photos": list(user_photos),
         "index": 0
     }
-
-    first_photo = user_photos[0]
 
     caption = (
         f"📸 1 / {len(user_photos)}"
@@ -199,78 +275,92 @@ def publish_carousel(user_chat_id):
 
     try:
 
-        result = telegram(
-            "sendPhoto",
-            {
-                "chat_id": CHANNEL,
-                "photo": first_photo,
-                "caption": caption,
-                "reply_markup": json.dumps(keyboard)
-            }
+        result = send_photo(
+            CHANNEL,
+            user_photos[0],
+            caption,
+            keyboard
         )
 
-        # Сохраняем ID сообщения в канале
-        carousels[carousel_id]["message_id"] = result["message_id"]
+        carousels[carousel_id][
+            "message_id"
+        ] = result["message_id"]
 
-        send_message(
-            user_chat_id,
-            "✅ Карусель опубликована!\n\n"
-            f"Фотографий: {len(user_photos)}\n"
-            "В канале используй кнопки ⬅️ ➡️ для перелистывания."
-        )
-
-        # Очищаем фотографии пользователя
-        photos[user_chat_id] = []
+        return True
 
     except Exception as e:
 
-        print("Publish error:", e)
-
-        send_message(
-            user_chat_id,
-            "❌ Не удалось опубликовать карусель.\n\n"
-            "Проверь, что бот является администратором канала."
+        print(
+            "Publish error:",
+            e
         )
+
+        return False
 
 
 # =========================================================
 # ПЕРЕЛИСТЫВАНИЕ
 # =========================================================
 
-def change_carousel(callback_query):
+def change_carousel(
+    callback_query
+):
 
     callback_id = callback_query["id"]
 
-    data = callback_query.get("data", "")
+    data = callback_query.get(
+        "data",
+        ""
+    )
 
-    message = callback_query.get("message")
+    message = callback_query.get(
+        "message"
+    )
 
     if not message:
-        answer_callback(callback_id)
+
+        answer_callback(
+            callback_id
+        )
+
         return
 
     parts = data.split(":")
 
     if len(parts) != 2:
-        answer_callback(callback_id)
+
+        answer_callback(
+            callback_id
+        )
+
         return
 
     action = parts[0]
     carousel_id = parts[1]
 
-    carousel = carousels.get(carousel_id)
+    carousel = carousels.get(
+        carousel_id
+    )
 
     if not carousel:
-        answer_callback(callback_id)
+
+        answer_callback(
+            callback_id
+        )
+
         return
 
-    photos_list = carousel["photos"]
+    photo_list = carousel["photos"]
 
-    current_index = carousel["index"]
+    current_index = carousel[
+        "index"
+    ]
 
     if action == "next":
 
-        if current_index < len(photos_list) - 1:
+        if current_index < (
+            len(photo_list) - 1
+        ):
             current_index += 1
 
     elif action == "prev":
@@ -286,19 +376,19 @@ def change_carousel(callback_query):
 
         return
 
-    carousel["index"] = current_index
-
-    file_id = photos_list[current_index]
+    carousel["index"] = (
+        current_index
+    )
 
     caption = (
         f"📸 {current_index + 1} / "
-        f"{len(photos_list)}"
+        f"{len(photo_list)}"
     )
 
     keyboard = carousel_keyboard(
         carousel_id,
         current_index,
-        len(photos_list)
+        len(photo_list)
     )
 
     try:
@@ -306,16 +396,227 @@ def change_carousel(callback_query):
         edit_message_media(
             CHANNEL,
             message["message_id"],
-            file_id,
+            photo_list[current_index],
             caption,
             keyboard
         )
 
     except Exception as e:
 
-        print("Carousel edit error:", e)
+        print(
+            "Carousel edit error:",
+            e
+        )
 
-    answer_callback(callback_id)
+    answer_callback(
+        callback_id
+    )
+
+
+# =========================================================
+# ПЛАНИРОВАНИЕ
+# =========================================================
+
+def schedule_carousel(
+    user_chat_id,
+    date_text
+):
+
+    try:
+
+        # Ввод:
+        # 27.08.2026 18:30
+
+        scheduled_time = datetime.strptime(
+            date_text.strip(),
+            "%d.%m.%Y %H:%M"
+        )
+
+        # Считаем введённое время московским
+        scheduled_time = scheduled_time.replace(
+            tzinfo=MOSCOW
+        )
+
+    except ValueError:
+
+        send_message(
+            user_chat_id,
+            "❌ Неверный формат.\n\n"
+            "Используй:\n"
+            "27.08.2026 18:30\n\n"
+            "Время указывается по Москве (МСК)."
+        )
+
+        return
+
+    now = datetime.now(
+        MOSCOW
+    )
+
+    if scheduled_time <= now:
+
+        send_message(
+            user_chat_id,
+            "❌ Это время уже прошло.\n\n"
+            "Укажи будущую дату и время по Москве."
+        )
+
+        return
+
+    user_photos = photos.get(
+        user_chat_id,
+        []
+    )
+
+    if len(user_photos) < 2:
+
+        send_message(
+            user_chat_id,
+            "❌ Для планирования нужно "
+            "минимум 2 фотографии."
+        )
+
+        return
+
+    if len(user_photos) > MAX_PHOTOS:
+
+        user_photos = user_photos[
+            :MAX_PHOTOS
+        ]
+
+    scheduled_posts.append(
+        {
+            "user_chat_id": user_chat_id,
+            "photos": list(user_photos),
+            "publish_at": scheduled_time.isoformat()
+        }
+    )
+
+    photos[user_chat_id] = []
+
+    send_message(
+        user_chat_id,
+        "✅ Карусель запланирована!\n\n"
+        f"📅 {scheduled_time.strftime('%d.%m.%Y')}\n"
+        f"🕐 {scheduled_time.strftime('%H:%M')} МСК\n"
+        f"📸 Фотографий: {len(user_photos)}"
+    )
+
+
+# =========================================================
+# ПРОВЕРКА РАСПИСАНИЯ
+# =========================================================
+
+def scheduler_loop():
+
+    print(
+        "Scheduler started. Timezone: Moscow"
+    )
+
+    while True:
+
+        try:
+
+            now = datetime.now(
+                MOSCOW
+            )
+
+            ready_posts = []
+
+            for post in list(
+                scheduled_posts
+            ):
+
+                publish_at = datetime.fromisoformat(
+                    post["publish_at"]
+                )
+
+                if publish_at <= now:
+
+                    ready_posts.append(
+                        post
+                    )
+
+            for post in ready_posts:
+
+                success = publish_carousel(
+                    post["user_chat_id"],
+                    post["photos"]
+                )
+
+                if success:
+
+                    send_message(
+                        post["user_chat_id"],
+                        "✅ Запланированная "
+                        "карусель опубликована "
+                        "в канале."
+                    )
+
+                    scheduled_posts.remove(
+                        post
+                    )
+
+                else:
+
+                    print(
+                        "Scheduled publication failed"
+                    )
+
+        except Exception as e:
+
+            print(
+                "Scheduler error:",
+                e
+            )
+
+        time.sleep(10)
+
+
+# =========================================================
+# СПИСОК ЗАПЛАНИРОВАННЫХ
+# =========================================================
+
+def send_schedule_list(
+    chat_id
+):
+
+    if not scheduled_posts:
+
+        send_message(
+            chat_id,
+            "📅 Запланированных публикаций нет."
+        )
+
+        return
+
+    text = (
+        "📅 Запланированные публикации:\n\n"
+    )
+
+    for i, post in enumerate(
+        scheduled_posts,
+        start=1
+    ):
+
+        publish_at = datetime.fromisoformat(
+            post["publish_at"]
+        )
+
+        count = len(
+            post["photos"]
+        )
+
+        text += (
+            f"{i}. "
+            f"{publish_at.strftime('%d.%m.%Y %H:%M')} МСК — "
+            f"{count} фото\n"
+        )
+
+    send_message(
+        chat_id,
+        text
+    )
 
 
 # =========================================================
@@ -324,11 +625,9 @@ def change_carousel(callback_query):
 
 def process_update(update):
 
-    # -----------------------------------------------------
-    # КНОПКА КАРУСЕЛИ
-    # -----------------------------------------------------
-
-    callback_query = update.get("callback_query")
+    callback_query = update.get(
+        "callback_query"
+    )
 
     if callback_query:
 
@@ -338,18 +637,22 @@ def process_update(update):
 
         return
 
-    # -----------------------------------------------------
-    # ОБЫЧНОЕ СООБЩЕНИЕ
-    # -----------------------------------------------------
-
-    message = update.get("message")
+    message = update.get(
+        "message"
+    )
 
     if not message:
+
         return
 
-    chat_id = message["chat"]["id"]
+    chat_id = message[
+        "chat"
+    ]["id"]
 
-    text = message.get("text", "")
+    text = message.get(
+        "text",
+        ""
+    ).strip()
 
     # -----------------------------------------------------
     # START
@@ -366,9 +669,12 @@ def process_update(update):
             chat_id,
             "👋 Привет!\n\n"
             "Отправь от 2 до 9 фотографий.\n\n"
-            "После этого напиши /publish.\n\n"
-            "Я опубликую их как одну карусель "
-            "с кнопками ⬅️ ➡️."
+            "Команды:\n"
+            "/publish — опубликовать сейчас\n"
+            "/schedule — запланировать\n"
+            "/schedule_list — посмотреть расписание\n"
+            "/clear — очистить фотографии\n\n"
+            "Время планирования — московское (МСК)."
         )
 
         return
@@ -381,9 +687,77 @@ def process_update(update):
 
         photos[chat_id] = []
 
+        schedule_waiting.discard(
+            chat_id
+        )
+
         send_message(
             chat_id,
             "🗑 Фотографии очищены."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # СПИСОК РАСПИСАНИЯ
+    # -----------------------------------------------------
+
+    if text == "/schedule_list":
+
+        send_schedule_list(
+            chat_id
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # SCHEDULE
+    # -----------------------------------------------------
+
+    if text == "/schedule":
+
+        user_photos = photos.get(
+            chat_id,
+            []
+        )
+
+        if len(user_photos) < 2:
+
+            send_message(
+                chat_id,
+                "❌ Сначала отправь минимум "
+                "2 фотографии."
+            )
+
+            return
+
+        schedule_waiting.add(
+            chat_id
+        )
+
+        send_message(
+            chat_id,
+            "📅 Введи дату и время публикации.\n\n"
+            "Формат:\n"
+            "27.08.2026 18:30\n\n"
+            "🕐 Время указывается по Москве (МСК)."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ОЖИДАЕМ ДАТУ
+    # -----------------------------------------------------
+
+    if chat_id in schedule_waiting:
+
+        schedule_waiting.discard(
+            chat_id
+        )
+
+        schedule_carousel(
+            chat_id,
+            text
         )
 
         return
@@ -394,9 +768,40 @@ def process_update(update):
 
     if text == "/publish":
 
-        publish_carousel(
+        user_photos = photos.get(
+            chat_id,
+            []
+        )
+
+        if len(user_photos) < 2:
+
+            send_message(
+                chat_id,
+                "❌ Нужно минимум 2 фотографии."
+            )
+
+            return
+
+        success = publish_carousel(
             chat_id
         )
+
+        if success:
+
+            photos[chat_id] = []
+
+            send_message(
+                chat_id,
+                "✅ Карусель опубликована."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                "❌ Не удалось опубликовать.\n\n"
+                "Проверь права бота в канале."
+            )
 
         return
 
@@ -411,7 +816,7 @@ def process_update(update):
             []
         )
 
-        if len(photos[chat_id]) >= 9:
+        if len(photos[chat_id]) >= MAX_PHOTOS:
 
             send_message(
                 chat_id,
@@ -420,8 +825,9 @@ def process_update(update):
 
             return
 
-        # Берём самое большое доступное фото
-        file_id = message["photo"][-1]["file_id"]
+        file_id = message[
+            "photo"
+        ][-1]["file_id"]
 
         photos[chat_id].append(
             file_id
@@ -435,21 +841,23 @@ def process_update(update):
             chat_id,
             f"📷 Фото добавлено: {count}/9\n\n"
             "Можешь отправить ещё фотографии "
-            "или написать /publish."
+            "или написать /publish или /schedule."
         )
 
         return
 
 
 # =========================================================
-# ПОЛУЧЕНИЕ ОБНОВЛЕНИЙ
+# TELEGRAM LONG POLLING
 # =========================================================
 
 def run_bot():
 
     offset = None
 
-    print("Telegram carousel bot started.")
+    print(
+        "Telegram carousel bot started."
+    )
 
     while True:
 
@@ -464,6 +872,7 @@ def run_bot():
             }
 
             if offset is not None:
+
                 params["offset"] = offset
 
             response = requests.get(
@@ -482,6 +891,8 @@ def run_bot():
                     "Telegram API error:",
                     result
                 )
+
+                time.sleep(3)
 
                 continue
 
@@ -514,6 +925,8 @@ def run_bot():
                 e
             )
 
+            time.sleep(5)
+
 
 # =========================================================
 # ЗАПУСК
@@ -527,5 +940,12 @@ if __name__ == "__main__":
     )
 
     web_thread.start()
+
+    scheduler_thread = threading.Thread(
+        target=scheduler_loop,
+        daemon=True
+    )
+
+    scheduler_thread.start()
 
     run_bot()
