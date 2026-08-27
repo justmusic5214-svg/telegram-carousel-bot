@@ -1,13 +1,13 @@
 import os
-import time
 import json
+import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
-import psycopg
+import psycopg2
 
 
 # =========================================================
@@ -20,158 +20,72 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# Московское время
 MOSCOW = ZoneInfo("Europe/Moscow")
 
+# Максимум фотографий
 MAX_PHOTOS = 9
 
 
 # =========================================================
-# ВРЕМЕННЫЕ ДАННЫЕ
+# ВРЕМЕННЫЕ ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ
 # =========================================================
 
-# Фотографии, которые пользователь собирает прямо сейчас.
-# После /schedule или /publish они очищаются.
+# Фотографии, которые пользователь ещё не опубликовал
 user_photos = {}
 
-# Пользователи, от которых ждём дату.
+# Пользователи, от которых ждём дату/время
 waiting_for_schedule = set()
-
-# Данные опубликованных каруселей.
-# Нужны для работы кнопок ⬅️ ➡️.
-carousels = {}
 
 
 # =========================================================
 # DATABASE
 # =========================================================
 
-def db_connect():
-    return psycopg.connect(DATABASE_URL)
+def get_db():
+
+    return psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=10
+    )
 
 
 def init_database():
 
-    print("Connecting to PostgreSQL...")
+    connection = get_db()
 
-    with db_connect() as conn:
+    try:
 
-        with conn.cursor() as cur:
+        cursor = connection.cursor()
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS scheduled_posts (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_chat_id BIGINT NOT NULL,
-                    photos JSONB NOT NULL,
-                    publish_at TIMESTAMPTZ NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
-
-        conn.commit()
-
-    print("PostgreSQL connected.")
-    print("Database table is ready.")
-
-
-def save_scheduled_post(
-    user_chat_id,
-    photo_list,
-    publish_at
-):
-
-    with db_connect() as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                INSERT INTO scheduled_posts
-                    (user_chat_id, photos, publish_at)
-                VALUES
-                    (%s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    user_chat_id,
-                    json.dumps(photo_list),
-                    publish_at
-                )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id BIGSERIAL PRIMARY KEY,
+                user_chat_id BIGINT NOT NULL,
+                photos TEXT NOT NULL,
+                publish_at TIMESTAMPTZ NOT NULL,
+                status TEXT NOT NULL DEFAULT 'scheduled',
+                message_id BIGINT,
+                carousel_index INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+            """
+        )
 
-            post_id = cur.fetchone()[0]
+        connection.commit()
 
-        conn.commit()
+        cursor.close()
 
-    return post_id
+        print("Database initialized.")
 
+    finally:
 
-def get_scheduled_posts():
-
-    with db_connect() as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT
-                    id,
-                    user_chat_id,
-                    photos,
-                    publish_at
-                FROM scheduled_posts
-                WHERE publish_at <= NOW()
-                ORDER BY publish_at ASC
-                """
-            )
-
-            rows = cur.fetchall()
-
-    return rows
-
-
-def get_future_posts():
-
-    with db_connect() as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT
-                    id,
-                    user_chat_id,
-                    photos,
-                    publish_at
-                FROM scheduled_posts
-                WHERE publish_at > NOW()
-                ORDER BY publish_at ASC
-                """
-            )
-
-            rows = cur.fetchall()
-
-    return rows
-
-
-def delete_scheduled_post(post_id):
-
-    with db_connect() as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                DELETE FROM scheduled_posts
-                WHERE id = %s
-                """,
-                (post_id,)
-            )
-
-        conn.commit()
+        connection.close()
 
 
 # =========================================================
-# HTTP SERVER FOR RENDER
+# HTTP SERVER ДЛЯ RENDER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -205,7 +119,10 @@ def start_web_server():
     )
 
     server = HTTPServer(
-        ("0.0.0.0", port),
+        (
+            "0.0.0.0",
+            port
+        ),
         HealthHandler
     )
 
@@ -237,7 +154,9 @@ def telegram(
 
     if not result.get("ok"):
 
-        raise Exception(result)
+        raise Exception(
+            result
+        )
 
     return result["result"]
 
@@ -265,18 +184,6 @@ def send_message(
     )
 
 
-def answer_callback(
-    callback_id
-):
-
-    return telegram(
-        "answerCallbackQuery",
-        {
-            "callback_query_id": callback_id
-        }
-    )
-
-
 def send_photo(
     chat_id,
     photo,
@@ -297,17 +204,30 @@ def send_photo(
     )
 
 
+def answer_callback(
+    callback_id
+):
+
+    return telegram(
+        "answerCallbackQuery",
+        {
+            "callback_query_id":
+                callback_id
+        }
+    )
+
+
 def edit_message_media(
     chat_id,
     message_id,
-    file_id,
+    photo,
     caption,
     reply_markup
 ):
 
     media = {
         "type": "photo",
-        "media": file_id,
+        "media": photo,
         "caption": caption
     }
 
@@ -316,7 +236,9 @@ def edit_message_media(
         {
             "chat_id": chat_id,
             "message_id": message_id,
-            "media": json.dumps(media),
+            "media": json.dumps(
+                media
+            ),
             "reply_markup": json.dumps(
                 reply_markup
             )
@@ -325,11 +247,11 @@ def edit_message_media(
 
 
 # =========================================================
-# CAROUSEL KEYBOARD
+# КНОПКИ КАРУСЕЛИ
 # =========================================================
 
 def carousel_keyboard(
-    carousel_id,
+    post_id,
     index,
     total
 ):
@@ -342,15 +264,16 @@ def carousel_keyboard(
             {
                 "text": "⬅️",
                 "callback_data":
-                    f"prev:{carousel_id}"
+                    f"prev:{post_id}"
             }
         )
 
     buttons.append(
         {
-            "text": f"{index + 1} / {total}",
+            "text":
+                f"{index + 1} / {total}",
             "callback_data":
-                f"info:{carousel_id}"
+                f"info:{post_id}"
         }
     )
 
@@ -360,7 +283,7 @@ def carousel_keyboard(
             {
                 "text": "➡️",
                 "callback_data":
-                    f"next:{carousel_id}"
+                    f"next:{post_id}"
             }
         )
 
@@ -372,70 +295,314 @@ def carousel_keyboard(
 
 
 # =========================================================
-# PUBLISH CAROUSEL
+# СОЗДАНИЕ ЗАПЛАНИРОВАННОГО ПОСТА
 # =========================================================
 
-def publish_carousel(
-    photo_list
+def save_scheduled_post(
+    user_chat_id,
+    photos,
+    publish_at
 ):
 
-    if len(photo_list) < 2:
+    connection = get_db()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO scheduled_posts
+            (
+                user_chat_id,
+                photos,
+                publish_at
+            )
+            VALUES (%s, %s, %s)
+            RETURNING id
+            """,
+            (
+                user_chat_id,
+                json.dumps(photos),
+                publish_at
+            )
+        )
+
+        post_id = cursor.fetchone()[0]
+
+        connection.commit()
+
+        cursor.close()
+
+        return post_id
+
+    finally:
+
+        connection.close()
+
+
+# =========================================================
+# ПОЛУЧЕНИЕ ЗАПЛАНИРОВАННЫХ ПОСТОВ
+# =========================================================
+
+def get_ready_posts():
+
+    connection = get_db()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                user_chat_id,
+                photos,
+                publish_at
+            FROM scheduled_posts
+            WHERE status = 'scheduled'
+              AND publish_at <= NOW()
+            ORDER BY publish_at ASC
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        cursor.close()
+
+        return rows
+
+    finally:
+
+        connection.close()
+
+
+# =========================================================
+# ПОЛУЧЕНИЕ ВСЕХ ЗАПЛАНИРОВАННЫХ
+# =========================================================
+
+def get_scheduled_posts():
+
+    connection = get_db()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                photos,
+                publish_at
+            FROM scheduled_posts
+            WHERE status = 'scheduled'
+            ORDER BY publish_at ASC
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        cursor.close()
+
+        return rows
+
+    finally:
+
+        connection.close()
+
+
+# =========================================================
+# ОБНОВЛЕНИЕ ПОСТА
+# =========================================================
+
+def update_post_after_publish(
+    post_id,
+    message_id
+):
+
+    connection = get_db()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            UPDATE scheduled_posts
+            SET
+                status = 'published',
+                message_id = %s,
+                carousel_index = 0
+            WHERE id = %s
+            """,
+            (
+                message_id,
+                post_id
+            )
+        )
+
+        connection.commit()
+
+        cursor.close()
+
+    finally:
+
+        connection.close()
+
+
+def update_carousel_index(
+    post_id,
+    index
+):
+
+    connection = get_db()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            UPDATE scheduled_posts
+            SET carousel_index = %s
+            WHERE id = %s
+            """,
+            (
+                index,
+                post_id
+            )
+        )
+
+        connection.commit()
+
+        cursor.close()
+
+    finally:
+
+        connection.close()
+
+
+# =========================================================
+# ПУБЛИКАЦИЯ КАРУСЕЛИ
+# =========================================================
+
+def publish_scheduled_post(
+    post
+):
+
+    post_id = post[0]
+    user_chat_id = post[1]
+    photos_json = post[2]
+
+    photos = json.loads(
+        photos_json
+    )
+
+    if len(photos) < 2:
+
+        print(
+            f"Post {post_id}: "
+            "not enough photos"
+        )
 
         return False
 
-    photo_list = photo_list[
-        :MAX_PHOTOS
-    ]
+    if len(photos) > MAX_PHOTOS:
 
-    carousel_id = str(
-        int(time.time() * 1000)
-    )
-
-    carousels[carousel_id] = {
-        "photos": photo_list,
-        "index": 0
-    }
-
-    caption = (
-        f"📸 1 / {len(photo_list)}"
-    )
+        photos = photos[:MAX_PHOTOS]
 
     keyboard = carousel_keyboard(
-        carousel_id,
+        post_id,
         0,
-        len(photo_list)
+        len(photos)
+    )
+
+    caption = (
+        f"📸 1 / {len(photos)}"
     )
 
     try:
 
         result = send_photo(
             CHANNEL,
-            photo_list[0],
+            photos[0],
             caption,
             keyboard
         )
 
-        carousels[carousel_id][
+        message_id = result[
             "message_id"
-        ] = result["message_id"]
+        ]
+
+        update_post_after_publish(
+            post_id,
+            message_id
+        )
+
+        send_message(
+            user_chat_id,
+            "✅ Запланированная "
+            "карусель опубликована!\n\n"
+            f"📸 Фотографий: {len(photos)}"
+        )
+
+        print(
+            f"Post {post_id} "
+            "published successfully."
+        )
 
         return True
 
     except Exception as e:
 
         print(
-            "Publish error:",
-            e
+            f"Post {post_id} "
+            f"publish error: {e}"
         )
 
         return False
 
 
 # =========================================================
-# CAROUSEL NAVIGATION
+# ПЛАНИРОВЩИК
 # =========================================================
 
-def change_carousel(
+def scheduler_loop():
+
+    print(
+        "Scheduler started."
+    )
+
+    while True:
+
+        try:
+
+            posts = get_ready_posts()
+
+            for post in posts:
+
+                publish_scheduled_post(
+                    post
+                )
+
+        except Exception as e:
+
+            print(
+                "Scheduler error:",
+                e
+            )
+
+        # Проверяем каждые 10 секунд
+        time.sleep(10)
+
+
+# =========================================================
+# ПЕРЕЛИСТЫВАНИЕ КАРУСЕЛИ
+# =========================================================
+
+def handle_carousel_callback(
     callback_query
 ):
 
@@ -469,13 +636,14 @@ def change_carousel(
         return
 
     action = parts[0]
-    carousel_id = parts[1]
 
-    carousel = carousels.get(
-        carousel_id
-    )
+    try:
 
-    if not carousel:
+        post_id = int(
+            parts[1]
+        )
+
+    except ValueError:
 
         answer_callback(
             callback_id
@@ -483,21 +651,62 @@ def change_carousel(
 
         return
 
-    photo_list = carousel["photos"]
+    connection = get_db()
 
-    index = carousel["index"]
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                photos,
+                carousel_index,
+                message_id
+            FROM scheduled_posts
+            WHERE id = %s
+              AND status = 'published'
+            """,
+            (
+                post_id,
+            )
+        )
+
+        row = cursor.fetchone()
+
+        cursor.close()
+
+    finally:
+
+        connection.close()
+
+    if not row:
+
+        answer_callback(
+            callback_id
+        )
+
+        return
+
+    photos = json.loads(
+        row[0]
+    )
+
+    current_index = row[1]
 
     if action == "next":
 
-        if index < len(photo_list) - 1:
+        if current_index < (
+            len(photos) - 1
+        ):
 
-            index += 1
+            current_index += 1
 
     elif action == "prev":
 
-        if index > 0:
+        if current_index > 0:
 
-            index -= 1
+            current_index -= 1
 
     elif action == "info":
 
@@ -507,17 +716,20 @@ def change_carousel(
 
         return
 
-    carousel["index"] = index
-
-    caption = (
-        f"📸 {index + 1} / "
-        f"{len(photo_list)}"
+    update_carousel_index(
+        post_id,
+        current_index
     )
 
     keyboard = carousel_keyboard(
-        carousel_id,
-        index,
-        len(photo_list)
+        post_id,
+        current_index,
+        len(photos)
+    )
+
+    caption = (
+        f"📸 {current_index + 1} / "
+        f"{len(photos)}"
     )
 
     try:
@@ -525,7 +737,7 @@ def change_carousel(
         edit_message_media(
             CHANNEL,
             message["message_id"],
-            photo_list[index],
+            photos[current_index],
             caption,
             keyboard
         )
@@ -543,139 +755,21 @@ def change_carousel(
 
 
 # =========================================================
-# SCHEDULE
+# РАСПИСАНИЕ
 # =========================================================
 
-def schedule_carousel(
-    chat_id,
-    date_text
-):
-
-    try:
-
-        local_dt = datetime.strptime(
-            date_text.strip(),
-            "%d.%m.%Y %H:%M"
-        )
-
-        local_dt = local_dt.replace(
-            tzinfo=MOSCOW
-        )
-
-        utc_dt = local_dt.astimezone(
-            timezone.utc
-        )
-
-    except ValueError:
-
-        send_message(
-            chat_id,
-            "❌ Неверный формат даты.\n\n"
-            "Используй:\n"
-            "27.08.2026 18:30\n\n"
-            "🕐 Время указывается по Москве (МСК)."
-        )
-
-        return
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    if utc_dt <= now:
-
-        send_message(
-            chat_id,
-            "❌ Это время уже прошло.\n\n"
-            "Укажи будущую дату и время."
-        )
-
-        return
-
-    photo_list = user_photos.get(
-        chat_id,
-        []
-    )
-
-    if len(photo_list) < 2:
-
-        send_message(
-            chat_id,
-            "❌ Нужно минимум 2 фотографии."
-        )
-
-        return
-
-    photo_list = photo_list[
-        :MAX_PHOTOS
-    ]
-
-    try:
-
-        post_id = save_scheduled_post(
-            chat_id,
-            photo_list,
-            utc_dt
-        )
-
-    except Exception as e:
-
-        print(
-            "Database save error:",
-            e
-        )
-
-        send_message(
-            chat_id,
-            "❌ Не удалось сохранить расписание "
-            "в базу данных."
-        )
-
-        return
-
-    user_photos[chat_id] = []
-
-    send_message(
-        chat_id,
-        "✅ Карусель запланирована!\n\n"
-        f"📅 {local_dt.strftime('%d.%m.%Y')}\n"
-        f"🕐 {local_dt.strftime('%H:%M')} МСК\n"
-        f"📸 Фотографий: {len(photo_list)}\n"
-        f"🆔 №{post_id}"
-    )
-
-
-# =========================================================
-# SCHEDULE LIST
-# =========================================================
-
-def send_schedule_list(
+def show_schedule(
     chat_id
 ):
 
-    try:
+    posts = get_scheduled_posts()
 
-        rows = get_future_posts()
-
-    except Exception as e:
-
-        print(
-            "Schedule list database error:",
-            e
-        )
+    if not posts:
 
         send_message(
             chat_id,
-            "❌ Не удалось получить расписание."
-        )
-
-        return
-
-    if not rows:
-
-        send_message(
-            chat_id,
-            "📅 Запланированных публикаций нет."
+            "📅 Запланированных "
+            "публикаций нет."
         )
 
         return
@@ -684,35 +778,38 @@ def send_schedule_list(
         "📅 Запланированные публикации:\n\n"
     )
 
-    for (
-        post_id,
-        user_chat_id,
-        photo_json,
-        publish_at
-    ) in rows:
+    for number, row in enumerate(
+        posts,
+        start=1
+    ):
 
-        if isinstance(
-            photo_json,
-            str
-        ):
+        post_id = row[0]
 
-            photo_list = json.loads(
-                photo_json
+        photos = json.loads(
+            row[1]
+        )
+
+        publish_at = row[2]
+
+        if publish_at.tzinfo is None:
+
+            publish_at = publish_at.replace(
+                tzinfo=ZoneInfo("UTC")
             )
 
-        else:
-
-            photo_list = photo_json
-
-        moscow_dt = publish_at.astimezone(
+        moscow_time = publish_at.astimezone(
             MOSCOW
         )
 
         text += (
-            f"🆔 {post_id}\n"
-            f"📅 {moscow_dt.strftime('%d.%m.%Y')}\n"
-            f"🕐 {moscow_dt.strftime('%H:%M')} МСК\n"
-            f"📸 {len(photo_list)} фото\n\n"
+            f"{number}. "
+            f"ID {post_id}\n"
+            f"📅 "
+            f"{moscow_time.strftime('%d.%m.%Y')}\n"
+            f"🕐 "
+            f"{moscow_time.strftime('%H:%M')} МСК\n"
+            f"📸 "
+            f"{len(photos)} фото\n\n"
         )
 
     send_message(
@@ -722,91 +819,99 @@ def send_schedule_list(
 
 
 # =========================================================
-# SCHEDULER
+# ОБРАБОТКА ЗАПЛАНИРОВАНИЯ
 # =========================================================
 
-def scheduler_loop():
+def create_schedule(
+    chat_id,
+    date_text
+):
 
-    print(
-        "Scheduler started."
+    try:
+
+        local_datetime = datetime.strptime(
+            date_text.strip(),
+            "%d.%m.%Y %H:%M"
+        )
+
+        # Введённое время считаем московским
+        local_datetime = local_datetime.replace(
+            tzinfo=MOSCOW
+        )
+
+    except ValueError:
+
+        send_message(
+            chat_id,
+            "❌ Неверный формат даты.\n\n"
+            "Нужно написать:\n"
+            "27.08.2026 18:30\n\n"
+            "🕐 Время — московское (МСК)."
+        )
+
+        waiting_for_schedule.add(
+            chat_id
+        )
+
+        return
+
+    now = datetime.now(
+        MOSCOW
     )
 
-    print(
-        "Timezone: Europe/Moscow"
+    if local_datetime <= now:
+
+        send_message(
+            chat_id,
+            "❌ Это время уже прошло.\n\n"
+            "Укажи будущую дату и время МСК."
+        )
+
+        waiting_for_schedule.add(
+            chat_id
+        )
+
+        return
+
+    photos = user_photos.get(
+        chat_id,
+        []
     )
 
-    while True:
+    if len(photos) < 2:
 
-        try:
+        send_message(
+            chat_id,
+            "❌ Нужно минимум 2 фотографии."
+        )
 
-            rows = get_scheduled_posts()
+        return
 
-            for (
-                post_id,
-                chat_id,
-                photo_json,
-                publish_at
-            ) in rows:
+    if len(photos) > MAX_PHOTOS:
 
-                if isinstance(
-                    photo_json,
-                    str
-                ):
+        photos = photos[:MAX_PHOTOS]
 
-                    photo_list = json.loads(
-                        photo_json
-                    )
+    post_id = save_scheduled_post(
+        chat_id,
+        photos,
+        local_datetime
+    )
 
-                else:
+    # Очищаем текущую подборку
+    user_photos[chat_id] = []
 
-                    photo_list = photo_json
-
-                print(
-                    f"Publishing scheduled post #{post_id}"
-                )
-
-                success = publish_carousel(
-                    photo_list
-                )
-
-                if success:
-
-                    delete_scheduled_post(
-                        post_id
-                    )
-
-                    moscow_dt = publish_at.astimezone(
-                        MOSCOW
-                    )
-
-                    send_message(
-                        chat_id,
-                        "✅ Запланированная "
-                        "карусель опубликована!\n\n"
-                        f"📅 {moscow_dt.strftime('%d.%m.%Y')}\n"
-                        f"🕐 {moscow_dt.strftime('%H:%M')} МСК\n"
-                        f"🆔 №{post_id}"
-                    )
-
-                else:
-
-                    print(
-                        f"Failed to publish "
-                        f"scheduled post #{post_id}"
-                    )
-
-        except Exception as e:
-
-            print(
-                "Scheduler error:",
-                e
-            )
-
-        time.sleep(10)
+    send_message(
+        chat_id,
+        "✅ Карусель запланирована!\n\n"
+        f"🆔 Пост: {post_id}\n"
+        f"📅 {local_datetime.strftime('%d.%m.%Y')}\n"
+        f"🕐 {local_datetime.strftime('%H:%M')} МСК\n"
+        f"📸 Фотографий: {len(photos)}"
+    )
 
 
 # =========================================================
-# UPDATE PROCESSING
+# ОБРАБОТКА UPDATE
 # =========================================================
 
 def process_update(
@@ -814,7 +919,7 @@ def process_update(
 ):
 
     # -----------------------------------------------------
-    # CALLBACK
+    # КНОПКА КАРУСЕЛИ
     # -----------------------------------------------------
 
     callback_query = update.get(
@@ -823,14 +928,14 @@ def process_update(
 
     if callback_query:
 
-        change_carousel(
+        handle_carousel_callback(
             callback_query
         )
 
         return
 
     # -----------------------------------------------------
-    # MESSAGE
+    # СООБЩЕНИЕ
     # -----------------------------------------------------
 
     message = update.get(
@@ -870,7 +975,7 @@ def process_update(
             "/schedule — запланировать\n"
             "/schedule_list — расписание\n"
             "/clear — очистить фотографии\n\n"
-            "🕐 Время — московское (МСК)."
+            "🕐 Время планирования — МСК."
         )
 
         return
@@ -889,18 +994,18 @@ def process_update(
 
         send_message(
             chat_id,
-            "🗑 Фотографии очищены."
+            "🗑 Текущие фотографии очищены."
         )
 
         return
 
     # -----------------------------------------------------
-    # SCHEDULE LIST
+    # СПИСОК РАСПИСАНИЯ
     # -----------------------------------------------------
 
     if text == "/schedule_list":
 
-        send_schedule_list(
+        show_schedule(
             chat_id
         )
 
@@ -912,17 +1017,17 @@ def process_update(
 
     if text == "/schedule":
 
-        photo_list = user_photos.get(
+        photos = user_photos.get(
             chat_id,
             []
         )
 
-        if len(photo_list) < 2:
+        if len(photos) < 2:
 
             send_message(
                 chat_id,
-                "❌ Сначала отправь минимум "
-                "2 фотографии."
+                "❌ Сначала отправь "
+                "минимум 2 фотографии."
             )
 
             return
@@ -933,16 +1038,17 @@ def process_update(
 
         send_message(
             chat_id,
-            "📅 Введи дату и время публикации.\n\n"
-            "Например:\n"
+            "📅 Введи дату и время.\n\n"
+            "Пример:\n"
             "28.08.2026 18:30\n\n"
-            "🕐 Время — по Москве (МСК)."
+            "🕐 Время указывается "
+            "по Москве (МСК)."
         )
 
         return
 
     # -----------------------------------------------------
-    # WAITING FOR DATE
+    # ОЖИДАНИЕ ДАТЫ
     # -----------------------------------------------------
 
     if chat_id in waiting_for_schedule:
@@ -951,7 +1057,7 @@ def process_update(
             chat_id
         )
 
-        schedule_carousel(
+        create_schedule(
             chat_id,
             text
         )
@@ -959,17 +1065,17 @@ def process_update(
         return
 
     # -----------------------------------------------------
-    # PUBLISH NOW
+    # PUBLISH
     # -----------------------------------------------------
 
     if text == "/publish":
 
-        photo_list = user_photos.get(
+        photos = user_photos.get(
             chat_id,
             []
         )
 
-        if len(photo_list) < 2:
+        if len(photos) < 2:
 
             send_message(
                 chat_id,
@@ -978,30 +1084,64 @@ def process_update(
 
             return
 
-        success = publish_carousel(
-            photo_list
+        if len(photos) > MAX_PHOTOS:
+
+            photos = photos[:MAX_PHOTOS]
+
+        # Для публикации сразу создаём запись
+        # в БД, чтобы карусель тоже была постоянной
+
+        connection = get_db()
+
+        try:
+
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO scheduled_posts
+                (
+                    user_chat_id,
+                    photos,
+                    publish_at,
+                    status
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    NOW(),
+                    'scheduled'
+                )
+                RETURNING id
+                """,
+                (
+                    chat_id,
+                    json.dumps(photos)
+                )
+            )
+
+            post_id = cursor.fetchone()[0]
+
+            connection.commit()
+
+            cursor.close()
+
+        finally:
+
+            connection.close()
+
+        user_photos[chat_id] = []
+
+        send_message(
+            chat_id,
+            "⏳ Публикую карусель..."
         )
-
-        if success:
-
-            user_photos[chat_id] = []
-
-            send_message(
-                chat_id,
-                "✅ Карусель опубликована."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "❌ Не удалось опубликовать карусель."
-            )
 
         return
 
     # -----------------------------------------------------
-    # PHOTO
+    # ФОТО
     # -----------------------------------------------------
 
     if message.get("photo"):
@@ -1011,7 +1151,9 @@ def process_update(
             []
         )
 
-        if len(user_photos[chat_id]) >= MAX_PHOTOS:
+        if len(
+            user_photos[chat_id]
+        ) >= MAX_PHOTOS:
 
             send_message(
                 chat_id,
@@ -1024,7 +1166,9 @@ def process_update(
             "photo"
         ][-1]["file_id"]
 
-        user_photos[chat_id].append(
+        user_photos[
+            chat_id
+        ].append(
             file_id
         )
 
@@ -1034,9 +1178,10 @@ def process_update(
 
         send_message(
             chat_id,
-            f"📷 Фото добавлено: {count}/9\n\n"
-            "Можешь отправить ещё фотографии "
-            "или написать:\n"
+            f"📷 Фото добавлено: "
+            f"{count}/9\n\n"
+            "Можешь отправить ещё "
+            "фотографии или написать:\n"
             "/publish — сейчас\n"
             "/schedule — запланировать"
         )
@@ -1057,11 +1202,15 @@ def run_bot():
     )
 
     print(
-        "TELEGRAM CAROUSEL BOT"
+        " TELEGRAM CAROUSEL BOT"
     )
 
     print(
-        "Бот запущен."
+        " Бот запущен."
+    )
+
+    print(
+        " Часовой пояс: Москва (UTC+3)"
     )
 
     print(
@@ -1101,7 +1250,7 @@ def run_bot():
                     result
                 )
 
-                time.sleep(5)
+                time.sleep(3)
 
                 continue
 
@@ -1130,7 +1279,7 @@ def run_bot():
         except Exception as e:
 
             print(
-                "Telegram connection error:",
+                "Connection error:",
                 e
             )
 
@@ -1138,15 +1287,26 @@ def run_bot():
 
 
 # =========================================================
-# MAIN
+# ЗАПУСК
 # =========================================================
 
 if __name__ == "__main__":
 
-    # Проверяем БД ДО запуска бота.
-    init_database()
+    # Проверяем базу
+    try:
 
-    # HTTP для Render.
+        init_database()
+
+    except Exception as e:
+
+        print(
+            "DATABASE ERROR:",
+            e
+        )
+
+        raise
+
+    # Web server
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -1154,7 +1314,7 @@ if __name__ == "__main__":
 
     web_thread.start()
 
-    # Планировщик.
+    # Планировщик
     scheduler_thread = threading.Thread(
         target=scheduler_loop,
         daemon=True
@@ -1162,5 +1322,5 @@ if __name__ == "__main__":
 
     scheduler_thread.start()
 
-    # Telegram.
+    # Telegram bot
     run_bot()
