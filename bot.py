@@ -30,6 +30,7 @@ MAX_PHOTOS = 9
 # =========================================================
 
 user_photos = {}
+
 waiting_for_schedule = set()
 
 
@@ -42,11 +43,15 @@ def db_connect():
 
 
 def init_database():
+
     print("Connecting to PostgreSQL...", flush=True)
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
-            cur.execute("""
+
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS scheduled_posts (
                     id BIGSERIAL PRIMARY KEY,
                     user_chat_id BIGINT NOT NULL,
@@ -54,7 +59,8 @@ def init_database():
                     publish_at TIMESTAMPTZ NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """)
+                """
+            )
 
         conn.commit()
 
@@ -62,9 +68,14 @@ def init_database():
     print("Database table is ready.", flush=True)
 
 
-def save_scheduled_post(user_chat_id, photo_list, publish_at):
+def save_scheduled_post(
+    user_chat_id,
+    photo_list,
+    publish_at
+):
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -92,6 +103,7 @@ def save_scheduled_post(user_chat_id, photo_list, publish_at):
 def get_scheduled_posts():
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -115,6 +127,7 @@ def get_scheduled_posts():
 def get_future_posts():
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -138,6 +151,7 @@ def get_future_posts():
 def delete_scheduled_post(post_id):
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -154,6 +168,7 @@ def delete_scheduled_post(post_id):
 def cancel_scheduled_post(post_id):
 
     with db_connect() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -223,7 +238,10 @@ def start_web_server():
 # TELEGRAM API
 # =========================================================
 
-def telegram(method, data=None):
+def telegram(
+    method,
+    data=None
+):
 
     response = requests.post(
         f"{API}/{method}",
@@ -236,71 +254,98 @@ def telegram(method, data=None):
     result = response.json()
 
     if not result.get("ok"):
-        raise Exception(result)
+
+        raise Exception(
+            result
+        )
 
     return result["result"]
 
 
-def send_message(chat_id, text):
+# =========================================================
+# SEND MESSAGE
+# =========================================================
+
+def send_message(
+    chat_id,
+    text,
+    reply_markup=None
+):
+
+    data = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
+    if reply_markup:
+
+        data["reply_markup"] = json.dumps(
+            reply_markup,
+            ensure_ascii=False
+        )
 
     return telegram(
         "sendMessage",
-        {
-            "chat_id": chat_id,
-            "text": text
-        }
+        data
     )
 
 
 # =========================================================
-# НАСТОЯЩИЙ TELEGRAM АЛЬБОМ
+# PUBLISH TELEGRAM NATIVE SLIDESHOW
 # =========================================================
 
 def publish_carousel(photo_list):
 
     if len(photo_list) < 2:
+
         print(
             "Publish error: minimum 2 photos required.",
             flush=True
         )
+
         return False
 
     photo_list = photo_list[:MAX_PHOTOS]
 
-    # Настоящая медиагруппа Telegram.
-    #
-    # Telegram получает несколько фотографий одним
-    # sendMediaGroup и группирует их в один альбом.
-    media = []
-
-    for photo in photo_list:
-
-        media.append(
-            {
-                "type": "photo",
-                "media": photo
-            }
-        )
-
     try:
 
-        print(
-            f"Publishing real Telegram album: "
-            f"{len(photo_list)} photos",
-            flush=True
-        )
+        slideshow_blocks = []
+
+        for file_id in photo_list:
+
+            slideshow_blocks.append(
+                {
+                    "type": "photo",
+                    "photo": {
+                        "type": "photo",
+                        "media": file_id
+                    }
+                }
+            )
+
+        rich_message = {
+            "blocks": [
+                {
+                    "type": "slideshow",
+                    "blocks": slideshow_blocks
+                }
+            ]
+        }
 
         result = telegram(
-            "sendMediaGroup",
+            "sendRichMessage",
             {
                 "chat_id": CHANNEL,
-                "media": json.dumps(media)
+                "rich_message": json.dumps(
+                    rich_message,
+                    ensure_ascii=False
+                )
             }
         )
 
         print(
-            f"Telegram album published successfully. "
-            f"Messages: {len(result)}",
+            "Native Telegram slideshow published:",
+            result.get("message_id"),
             flush=True
         )
 
@@ -309,7 +354,7 @@ def publish_carousel(photo_list):
     except Exception as e:
 
         print(
-            "Publish album error:",
+            "Rich slideshow publish error:",
             repr(e),
             flush=True
         )
@@ -321,7 +366,10 @@ def publish_carousel(photo_list):
 # SCHEDULE
 # =========================================================
 
-def schedule_carousel(chat_id, date_text):
+def schedule_carousel(
+    chat_id,
+    date_text
+):
 
     try:
 
@@ -350,7 +398,9 @@ def schedule_carousel(chat_id, date_text):
 
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     if utc_dt <= now:
 
@@ -418,7 +468,9 @@ def schedule_carousel(chat_id, date_text):
 # SCHEDULE LIST
 # =========================================================
 
-def send_schedule_list(chat_id):
+def send_schedule_list(
+    chat_id
+):
 
     try:
 
@@ -463,10 +515,13 @@ def send_schedule_list(chat_id):
             photo_json,
             str
         ):
+
             photo_list = json.loads(
                 photo_json
             )
+
         else:
+
             photo_list = photo_json
 
         moscow_dt = publish_at.astimezone(
@@ -490,7 +545,10 @@ def send_schedule_list(chat_id):
 # CANCEL SCHEDULED POST
 # =========================================================
 
-def handle_cancel(chat_id, text):
+def handle_cancel(
+    chat_id,
+    text
+):
 
     parts = text.split()
 
@@ -516,7 +574,9 @@ def handle_cancel(chat_id, text):
 
         return
 
-    post_id = int(parts[1])
+    post_id = int(
+        parts[1]
+    )
 
     try:
 
@@ -589,10 +649,13 @@ def scheduler_loop():
                     photo_json,
                     str
                 ):
+
                     photo_list = json.loads(
                         photo_json
                     )
+
                 else:
+
                     photo_list = photo_json
 
                 print(
@@ -620,7 +683,6 @@ def scheduler_loop():
                         "карусель опубликована!\n\n"
                         f"📅 {moscow_dt.strftime('%d.%m.%Y')}\n"
                         f"🕐 {moscow_dt.strftime('%H:%M')} МСК\n"
-                        f"📸 Фотографий: {len(photo_list)}\n"
                         f"🆔 №{post_id}"
                     )
 
@@ -647,17 +709,16 @@ def scheduler_loop():
 # UPDATE PROCESSING
 # =========================================================
 
-def process_update(update):
-
-    # -----------------------------------------------------
-    # MESSAGE
-    # -----------------------------------------------------
+def process_update(
+    update
+):
 
     message = update.get(
         "message"
     )
 
     if not message:
+
         return
 
     chat_id = message[
@@ -670,9 +731,9 @@ def process_update(update):
     ).strip()
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # START
-    # -----------------------------------------------------
+    # =====================================================
 
     if text == "/start":
 
@@ -681,27 +742,29 @@ def process_update(update):
             []
         )
 
+        waiting_for_schedule.discard(
+            chat_id
+        )
+
         send_message(
             chat_id,
             "👋 Привет!\n\n"
             "Отправь от 2 до 9 фотографий.\n\n"
-            "Команды:\n"
+            "После этого:\n"
             "/publish — опубликовать сейчас\n"
             "/schedule — запланировать\n"
             "/schedule_list — расписание\n"
             "/cancel ID — удалить публикацию\n"
             "/clear — очистить фотографии\n\n"
-            "🕐 Время — московское (МСК).\n\n"
-            "📸 Фотографии будут опубликованы "
-            "настоящим Telegram-альбомом."
+            "🕐 Время — московское (МСК)."
         )
 
         return
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # CLEAR
-    # -----------------------------------------------------
+    # =====================================================
 
     if text == "/clear":
 
@@ -719,9 +782,9 @@ def process_update(update):
         return
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # SCHEDULE LIST
-    # -----------------------------------------------------
+    # =====================================================
 
     if text == "/schedule_list":
 
@@ -732,9 +795,9 @@ def process_update(update):
         return
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # CANCEL
-    # -----------------------------------------------------
+    # =====================================================
 
     if text.startswith("/cancel"):
 
@@ -746,9 +809,9 @@ def process_update(update):
         return
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # SCHEDULE
-    # -----------------------------------------------------
+    # =====================================================
 
     if text == "/schedule":
 
@@ -782,27 +845,9 @@ def process_update(update):
         return
 
 
-    # -----------------------------------------------------
-    # WAITING FOR DATE
-    # -----------------------------------------------------
-
-    if chat_id in waiting_for_schedule:
-
-        waiting_for_schedule.discard(
-            chat_id
-        )
-
-        schedule_carousel(
-            chat_id,
-            text
-        )
-
-        return
-
-
-    # -----------------------------------------------------
+    # =====================================================
     # PUBLISH NOW
-    # -----------------------------------------------------
+    # =====================================================
 
     if text == "/publish":
 
@@ -838,15 +883,34 @@ def process_update(update):
             send_message(
                 chat_id,
                 "❌ Не удалось опубликовать "
-                "карусель."
+                "карусель.\n\n"
+                "Подробная ошибка есть в логах Render."
             )
 
         return
 
 
-    # -----------------------------------------------------
+    # =====================================================
+    # WAITING FOR DATE
+    # =====================================================
+
+    if chat_id in waiting_for_schedule:
+
+        waiting_for_schedule.discard(
+            chat_id
+        )
+
+        schedule_carousel(
+            chat_id,
+            text
+        )
+
+        return
+
+
+    # =====================================================
     # PHOTO
-    # -----------------------------------------------------
+    # =====================================================
 
     if message.get("photo"):
 
@@ -855,9 +919,7 @@ def process_update(update):
             []
         )
 
-        if len(
-            user_photos[chat_id]
-        ) >= MAX_PHOTOS:
+        if len(user_photos[chat_id]) >= MAX_PHOTOS:
 
             send_message(
                 chat_id,
@@ -884,7 +946,8 @@ def process_update(update):
             "Можешь отправить ещё фотографии "
             "или написать:\n"
             "/publish — сейчас\n"
-            "/schedule — запланировать"
+            "/schedule — запланировать\n"
+            "/clear — очистить"
         )
 
         return
@@ -905,6 +968,11 @@ def run_bot():
 
     print(
         "TELEGRAM CAROUSEL BOT",
+        flush=True
+    )
+
+    print(
+        "Native Telegram Rich Slideshow",
         flush=True
     )
 
@@ -960,19 +1028,10 @@ def run_bot():
 
                 continue
 
-            updates = result.get(
+            for update in result.get(
                 "result",
                 []
-            )
-
-            if updates:
-
-                print(
-                    f"Received {len(updates)} Telegram update(s)",
-                    flush=True
-                )
-
-            for update in updates:
+            ):
 
                 offset = (
                     update["update_id"] + 1
@@ -1011,6 +1070,11 @@ if __name__ == "__main__":
 
     init_database()
 
+
+    # -----------------------------------------------------
+    # HTTP SERVER
+    # -----------------------------------------------------
+
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -1018,11 +1082,21 @@ if __name__ == "__main__":
 
     web_thread.start()
 
+
+    # -----------------------------------------------------
+    # SCHEDULER
+    # -----------------------------------------------------
+
     scheduler_thread = threading.Thread(
         target=scheduler_loop,
         daemon=True
     )
 
     scheduler_thread.start()
+
+
+    # -----------------------------------------------------
+    # BOT
+    # -----------------------------------------------------
 
     run_bot()
