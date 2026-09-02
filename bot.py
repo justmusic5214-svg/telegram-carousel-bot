@@ -69,12 +69,12 @@ def init_database():
                 """
             )
 
-            # Добавляем описание в существующую таблицу.
-            # Если колонка уже существует — ничего не произойдёт.
+            # Добавляем колонку description
+            # в уже существующую таблицу.
             cur.execute(
                 """
                 ALTER TABLE scheduled_posts
-                ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''
+                ADD COLUMN IF NOT EXISTS description TEXT
                 """
             )
 
@@ -363,24 +363,41 @@ def publish_carousel(
                 }
             )
 
-        slideshow = {
-            "type": "slideshow",
-            "blocks": slideshow_blocks
-        }
 
-        # Если описание есть —
-        # добавляем его как подпись к slideshow.
+        # =================================================
+        # ОСНОВНОЙ SLIDESHOW
+        # =================================================
+
+        rich_blocks = [
+            {
+                "type": "slideshow",
+                "blocks": slideshow_blocks
+            }
+        ]
+
+
+        # =================================================
+        # ОПИСАНИЕ КАК ОТДЕЛЬНЫЙ ЧЁТКИЙ ТЕКСТОВЫЙ БЛОК
+        # =================================================
+
         if description:
 
-            slideshow["caption"] = {
-                "text": description
-            }
+            rich_blocks.append(
+                {
+                    "type": "paragraph",
+                    "text": description
+                }
+            )
+
+
+        # =================================================
+        # СОЗДАЁМ ОДНО RICH MESSAGE
+        # =================================================
 
         rich_message = {
-            "blocks": [
-                slideshow
-            ]
+            "blocks": rich_blocks
         }
+
 
         result = telegram(
             "sendRichMessage",
@@ -393,6 +410,7 @@ def publish_carousel(
             }
         )
 
+
         print(
             "Native Telegram slideshow published:",
             result.get("message_id"),
@@ -400,6 +418,7 @@ def publish_carousel(
         )
 
         return True
+
 
     except Exception as e:
 
@@ -427,14 +446,14 @@ def ask_for_description(
     send_message(
         chat_id,
         "📝 Напиши описание к публикации.\n\n"
-        "Текст будет размещён под фотографиями.\n\n"
+        "Оно будет размещено под фотографиями.\n\n"
         "Если описание не нужно — напиши:\n"
         "/skip"
     )
 
 
 # =========================================================
-# SAVE IMMEDIATE PUBLICATION DESCRIPTION
+# PUBLISH WITH DESCRIPTION
 # =========================================================
 
 def publish_with_description(
@@ -460,16 +479,20 @@ def publish_with_description(
 
         return
 
+
     photo_list = photo_list[:MAX_PHOTOS]
+
 
     success = publish_carousel(
         photo_list,
         description
     )
 
+
     waiting_for_description.discard(
         chat_id
     )
+
 
     if success:
 
@@ -527,9 +550,11 @@ def schedule_carousel(
 
         return
 
+
     now = datetime.now(
         timezone.utc
     )
+
 
     if utc_dt <= now:
 
@@ -541,10 +566,12 @@ def schedule_carousel(
 
         return
 
+
     photo_list = user_photos.get(
         chat_id,
         []
     )
+
 
     if len(photo_list) < 2:
 
@@ -555,7 +582,9 @@ def schedule_carousel(
 
         return
 
+
     photo_list = photo_list[:MAX_PHOTOS]
+
 
     try:
 
@@ -582,12 +611,15 @@ def schedule_carousel(
 
         return
 
+
     user_photos[chat_id] = []
+
 
     pending_schedule_dates.pop(
         chat_id,
         None
     )
+
 
     send_message(
         chat_id,
@@ -628,6 +660,7 @@ def send_schedule_list(
 
         return
 
+
     if not rows:
 
         send_message(
@@ -637,9 +670,11 @@ def send_schedule_list(
 
         return
 
+
     text = (
         "📅 Запланированные публикации:\n\n"
     )
+
 
     for (
         post_id,
@@ -648,6 +683,7 @@ def send_schedule_list(
         publish_at,
         description
     ) in rows:
+
 
         if isinstance(
             photo_json,
@@ -662,9 +698,11 @@ def send_schedule_list(
 
             photo_list = photo_json
 
+
         moscow_dt = publish_at.astimezone(
             MOSCOW
         )
+
 
         text += (
             f"🆔 {post_id}\n"
@@ -674,6 +712,7 @@ def send_schedule_list(
             f"📝 Описание: "
             f"{'есть' if description else 'нет'}\n\n"
         )
+
 
     send_message(
         chat_id,
@@ -692,6 +731,7 @@ def handle_cancel(
 
     parts = text.split()
 
+
     if len(parts) != 2:
 
         send_message(
@@ -702,6 +742,7 @@ def handle_cancel(
         )
 
         return
+
 
     if not parts[1].isdigit():
 
@@ -714,9 +755,11 @@ def handle_cancel(
 
         return
 
+
     post_id = int(
         parts[1]
     )
+
 
     try:
 
@@ -738,6 +781,7 @@ def handle_cancel(
         )
 
         return
+
 
     if deleted:
 
@@ -772,11 +816,13 @@ def scheduler_loop():
         flush=True
     )
 
+
     while True:
 
         try:
 
             rows = get_scheduled_posts()
+
 
             for (
                 post_id,
@@ -785,6 +831,7 @@ def scheduler_loop():
                 publish_at,
                 description
             ) in rows:
+
 
                 if isinstance(
                     photo_json,
@@ -799,15 +846,18 @@ def scheduler_loop():
 
                     photo_list = photo_json
 
+
                 print(
                     f"Publishing scheduled post #{post_id}",
                     flush=True
                 )
 
+
                 success = publish_carousel(
                     photo_list,
                     description or ""
                 )
+
 
                 if success:
 
@@ -815,9 +865,11 @@ def scheduler_loop():
                         post_id
                     )
 
+
                     moscow_dt = publish_at.astimezone(
                         MOSCOW
                     )
+
 
                     send_message(
                         chat_id,
@@ -828,6 +880,7 @@ def scheduler_loop():
                         f"🆔 №{post_id}"
                     )
 
+
                 else:
 
                     print(
@@ -836,6 +889,7 @@ def scheduler_loop():
                         flush=True
                     )
 
+
         except Exception as e:
 
             print(
@@ -843,6 +897,7 @@ def scheduler_loop():
                 repr(e),
                 flush=True
             )
+
 
         time.sleep(10)
 
@@ -859,13 +914,16 @@ def process_update(
         "message"
     )
 
+
     if not message:
 
         return
 
+
     chat_id = message[
         "chat"
     ]["id"]
+
 
     text = message.get(
         "text",
@@ -884,18 +942,22 @@ def process_update(
             []
         )
 
+
         waiting_for_schedule.discard(
             chat_id
         )
+
 
         waiting_for_description.discard(
             chat_id
         )
 
+
         pending_schedule_dates.pop(
             chat_id,
             None
         )
+
 
         send_message(
             chat_id,
@@ -912,6 +974,7 @@ def process_update(
             "🕐 Время — московское (МСК)."
         )
 
+
         return
 
 
@@ -923,24 +986,29 @@ def process_update(
 
         user_photos[chat_id] = []
 
+
         waiting_for_schedule.discard(
             chat_id
         )
 
+
         waiting_for_description.discard(
             chat_id
         )
+
 
         pending_schedule_dates.pop(
             chat_id,
             None
         )
 
+
         send_message(
             chat_id,
             "🗑 Фотографии и данные публикации "
             "очищены."
         )
+
 
         return
 
@@ -960,36 +1028,42 @@ def process_update(
 
             return
 
-        # -------------------------------------------------
-        # Описание для обычной публикации
-        # -------------------------------------------------
-
-        if chat_id not in pending_schedule_dates:
-
-            publish_with_description(
-                chat_id,
-                ""
-            )
-
-            return
 
         # -------------------------------------------------
         # Описание для запланированной публикации
         # -------------------------------------------------
 
-        date_text = pending_schedule_dates.get(
-            chat_id
-        )
+        if chat_id in pending_schedule_dates:
 
-        waiting_for_description.discard(
-            chat_id
-        )
+            date_text = pending_schedule_dates.get(
+                chat_id
+            )
 
-        schedule_carousel(
+
+            waiting_for_description.discard(
+                chat_id
+            )
+
+
+            schedule_carousel(
+                chat_id,
+                date_text,
+                ""
+            )
+
+
+            return
+
+
+        # -------------------------------------------------
+        # Описание для публикации сейчас
+        # -------------------------------------------------
+
+        publish_with_description(
             chat_id,
-            date_text,
             ""
         )
+
 
         return
 
@@ -1032,6 +1106,7 @@ def process_update(
             []
         )
 
+
         if len(photo_list) < 2:
 
             send_message(
@@ -1042,9 +1117,11 @@ def process_update(
 
             return
 
+
         waiting_for_schedule.add(
             chat_id
         )
+
 
         send_message(
             chat_id,
@@ -1053,6 +1130,7 @@ def process_update(
             "03.09.2026 18:30\n\n"
             "🕐 Время — по Москве (МСК)."
         )
+
 
         return
 
@@ -1070,13 +1148,16 @@ def process_update(
                 "%d.%m.%Y %H:%M"
             )
 
+
             local_dt = local_dt.replace(
                 tzinfo=MOSCOW
             )
 
+
             utc_dt = local_dt.astimezone(
                 timezone.utc
             )
+
 
         except ValueError:
 
@@ -1089,9 +1170,11 @@ def process_update(
 
             return
 
+
         now = datetime.now(
             timezone.utc
         )
+
 
         if utc_dt <= now:
 
@@ -1103,15 +1186,20 @@ def process_update(
 
             return
 
+
         waiting_for_schedule.discard(
             chat_id
         )
 
+
+        # Сохраняем именно введённую дату.
         pending_schedule_dates[chat_id] = text
+
 
         waiting_for_description.add(
             chat_id
         )
+
 
         send_message(
             chat_id,
@@ -1122,6 +1210,7 @@ def process_update(
             "Если описание не нужно — "
             "напиши /skip"
         )
+
 
         return
 
@@ -1134,6 +1223,7 @@ def process_update(
 
         description = text
 
+
         # -------------------------------------------------
         # Описание для запланированной публикации
         # -------------------------------------------------
@@ -1144,9 +1234,11 @@ def process_update(
                 chat_id
             )
 
+
             waiting_for_description.discard(
                 chat_id
             )
+
 
             schedule_carousel(
                 chat_id,
@@ -1154,7 +1246,9 @@ def process_update(
                 description
             )
 
+
             return
+
 
         # -------------------------------------------------
         # Описание для публикации сейчас
@@ -1164,6 +1258,7 @@ def process_update(
             chat_id,
             description
         )
+
 
         return
 
@@ -1179,6 +1274,7 @@ def process_update(
             []
         )
 
+
         if len(photo_list) < 2:
 
             send_message(
@@ -1188,9 +1284,11 @@ def process_update(
 
             return
 
+
         ask_for_description(
             chat_id
         )
+
 
         return
 
@@ -1206,6 +1304,7 @@ def process_update(
             []
         )
 
+
         if len(user_photos[chat_id]) >= MAX_PHOTOS:
 
             send_message(
@@ -1215,17 +1314,21 @@ def process_update(
 
             return
 
+
         file_id = message[
             "photo"
         ][-1]["file_id"]
+
 
         user_photos[chat_id].append(
             file_id
         )
 
+
         count = len(
             user_photos[chat_id]
         )
+
 
         send_message(
             chat_id,
@@ -1236,6 +1339,7 @@ def process_update(
             "/schedule — запланировать\n"
             "/clear — очистить"
         )
+
 
         return
 
@@ -1248,40 +1352,48 @@ def run_bot():
 
     offset = None
 
+
     print(
         "===================================",
         flush=True
     )
+
 
     print(
         "TELEGRAM CAROUSEL BOT",
         flush=True
     )
 
+
     print(
         "Native Telegram Rich Slideshow",
         flush=True
     )
 
+
     print(
-        "Description support: ON",
+        "Description: separate paragraph block",
         flush=True
     )
+
 
     print(
         "Timezone: Europe/Moscow",
         flush=True
     )
 
+
     print(
         "Бот запущен.",
         flush=True
     )
 
+
     print(
         "===================================",
         flush=True
     )
+
 
     while True:
 
@@ -1294,9 +1406,11 @@ def run_bot():
                 ]
             }
 
+
             if offset is not None:
 
                 params["offset"] = offset
+
 
             response = requests.get(
                 f"{API}/getUpdates",
@@ -1304,9 +1418,12 @@ def run_bot():
                 timeout=40
             )
 
+
             response.raise_for_status()
 
+
             result = response.json()
+
 
             if not result.get("ok"):
 
@@ -1316,9 +1433,11 @@ def run_bot():
                     flush=True
                 )
 
+
                 time.sleep(5)
 
                 continue
+
 
             for update in result.get(
                 "result",
@@ -1329,11 +1448,13 @@ def run_bot():
                     update["update_id"] + 1
                 )
 
+
                 try:
 
                     process_update(
                         update
                     )
+
 
                 except Exception as e:
 
@@ -1343,6 +1464,7 @@ def run_bot():
                         flush=True
                     )
 
+
         except Exception as e:
 
             print(
@@ -1350,6 +1472,7 @@ def run_bot():
                 repr(e),
                 flush=True
             )
+
 
             time.sleep(5)
 
@@ -1372,6 +1495,7 @@ if __name__ == "__main__":
         daemon=True
     )
 
+
     web_thread.start()
 
 
@@ -1383,6 +1507,7 @@ if __name__ == "__main__":
         target=scheduler_loop,
         daemon=True
     )
+
 
     scheduler_thread.start()
 
