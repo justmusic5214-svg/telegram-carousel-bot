@@ -33,6 +33,10 @@ user_photos = {}
 
 waiting_for_schedule = set()
 
+waiting_for_description = set()
+
+pending_schedule_dates = {}
+
 
 # =========================================================
 # DATABASE
@@ -44,7 +48,10 @@ def db_connect():
 
 def init_database():
 
-    print("Connecting to PostgreSQL...", flush=True)
+    print(
+        "Connecting to PostgreSQL...",
+        flush=True
+    )
 
     with db_connect() as conn:
 
@@ -62,16 +69,33 @@ def init_database():
                 """
             )
 
+            # Добавляем описание в существующую таблицу.
+            # Если колонка уже существует — ничего не произойдёт.
+            cur.execute(
+                """
+                ALTER TABLE scheduled_posts
+                ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''
+                """
+            )
+
         conn.commit()
 
-    print("PostgreSQL connected.", flush=True)
-    print("Database table is ready.", flush=True)
+    print(
+        "PostgreSQL connected.",
+        flush=True
+    )
+
+    print(
+        "Database table is ready.",
+        flush=True
+    )
 
 
 def save_scheduled_post(
     user_chat_id,
     photo_list,
-    publish_at
+    publish_at,
+    description
 ):
 
     with db_connect() as conn:
@@ -81,15 +105,26 @@ def save_scheduled_post(
             cur.execute(
                 """
                 INSERT INTO scheduled_posts
-                    (user_chat_id, photos, publish_at)
+                    (
+                        user_chat_id,
+                        photos,
+                        publish_at,
+                        description
+                    )
                 VALUES
-                    (%s, %s, %s)
+                    (
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
                 RETURNING id
                 """,
                 (
                     user_chat_id,
                     json.dumps(photo_list),
-                    publish_at
+                    publish_at,
+                    description
                 )
             )
 
@@ -112,7 +147,8 @@ def get_scheduled_posts():
                     id,
                     user_chat_id,
                     photos,
-                    publish_at
+                    publish_at,
+                    description
                 FROM scheduled_posts
                 WHERE publish_at <= NOW()
                 ORDER BY publish_at ASC
@@ -136,7 +172,8 @@ def get_future_posts():
                     id,
                     user_chat_id,
                     photos,
-                    publish_at
+                    publish_at,
+                    description
                 FROM scheduled_posts
                 WHERE publish_at > NOW()
                 ORDER BY publish_at ASC
@@ -294,7 +331,10 @@ def send_message(
 # PUBLISH TELEGRAM NATIVE SLIDESHOW
 # =========================================================
 
-def publish_carousel(photo_list):
+def publish_carousel(
+    photo_list,
+    description=""
+):
 
     if len(photo_list) < 2:
 
@@ -323,12 +363,22 @@ def publish_carousel(photo_list):
                 }
             )
 
+        slideshow = {
+            "type": "slideshow",
+            "blocks": slideshow_blocks
+        }
+
+        # Если описание есть —
+        # добавляем его как подпись к slideshow.
+        if description:
+
+            slideshow["caption"] = {
+                "text": description
+            }
+
         rich_message = {
             "blocks": [
-                {
-                    "type": "slideshow",
-                    "blocks": slideshow_blocks
-                }
+                slideshow
             ]
         }
 
@@ -363,12 +413,91 @@ def publish_carousel(photo_list):
 
 
 # =========================================================
+# ASK DESCRIPTION
+# =========================================================
+
+def ask_for_description(
+    chat_id
+):
+
+    waiting_for_description.add(
+        chat_id
+    )
+
+    send_message(
+        chat_id,
+        "📝 Напиши описание к публикации.\n\n"
+        "Текст будет размещён под фотографиями.\n\n"
+        "Если описание не нужно — напиши:\n"
+        "/skip"
+    )
+
+
+# =========================================================
+# SAVE IMMEDIATE PUBLICATION DESCRIPTION
+# =========================================================
+
+def publish_with_description(
+    chat_id,
+    description
+):
+
+    photo_list = user_photos.get(
+        chat_id,
+        []
+    )
+
+    if len(photo_list) < 2:
+
+        waiting_for_description.discard(
+            chat_id
+        )
+
+        send_message(
+            chat_id,
+            "❌ Нужно минимум 2 фотографии."
+        )
+
+        return
+
+    photo_list = photo_list[:MAX_PHOTOS]
+
+    success = publish_carousel(
+        photo_list,
+        description
+    )
+
+    waiting_for_description.discard(
+        chat_id
+    )
+
+    if success:
+
+        user_photos[chat_id] = []
+
+        send_message(
+            chat_id,
+            "✅ Карусель опубликована."
+        )
+
+    else:
+
+        send_message(
+            chat_id,
+            "❌ Не удалось опубликовать "
+            "карусель.\n\n"
+            "Подробная ошибка есть в логах Render."
+        )
+
+
+# =========================================================
 # SCHEDULE
 # =========================================================
 
 def schedule_carousel(
     chat_id,
-    date_text
+    date_text,
+    description
 ):
 
     try:
@@ -433,7 +562,8 @@ def schedule_carousel(
         post_id = save_scheduled_post(
             chat_id,
             photo_list,
-            utc_dt
+            utc_dt,
+            description
         )
 
     except Exception as e:
@@ -454,12 +584,19 @@ def schedule_carousel(
 
     user_photos[chat_id] = []
 
+    pending_schedule_dates.pop(
+        chat_id,
+        None
+    )
+
     send_message(
         chat_id,
         "✅ Карусель запланирована!\n\n"
         f"📅 {local_dt.strftime('%d.%m.%Y')}\n"
         f"🕐 {local_dt.strftime('%H:%M')} МСК\n"
         f"📸 Фотографий: {len(photo_list)}\n"
+        f"📝 Описание: "
+        f"{'есть' if description else 'нет'}\n"
         f"🆔 №{post_id}"
     )
 
@@ -508,7 +645,8 @@ def send_schedule_list(
         post_id,
         user_chat_id,
         photo_json,
-        publish_at
+        publish_at,
+        description
     ) in rows:
 
         if isinstance(
@@ -532,7 +670,9 @@ def send_schedule_list(
             f"🆔 {post_id}\n"
             f"📅 {moscow_dt.strftime('%d.%m.%Y')}\n"
             f"🕐 {moscow_dt.strftime('%H:%M')} МСК\n"
-            f"📸 {len(photo_list)} фото\n\n"
+            f"📸 {len(photo_list)} фото\n"
+            f"📝 Описание: "
+            f"{'есть' if description else 'нет'}\n\n"
         )
 
     send_message(
@@ -642,7 +782,8 @@ def scheduler_loop():
                 post_id,
                 chat_id,
                 photo_json,
-                publish_at
+                publish_at,
+                description
             ) in rows:
 
                 if isinstance(
@@ -664,7 +805,8 @@ def scheduler_loop():
                 )
 
                 success = publish_carousel(
-                    photo_list
+                    photo_list,
+                    description or ""
                 )
 
                 if success:
@@ -746,16 +888,27 @@ def process_update(
             chat_id
         )
 
+        waiting_for_description.discard(
+            chat_id
+        )
+
+        pending_schedule_dates.pop(
+            chat_id,
+            None
+        )
+
         send_message(
             chat_id,
             "👋 Привет!\n\n"
             "Отправь от 2 до 9 фотографий.\n\n"
-            "После этого:\n"
+            "Команды:\n"
             "/publish — опубликовать сейчас\n"
             "/schedule — запланировать\n"
             "/schedule_list — расписание\n"
             "/cancel ID — удалить публикацию\n"
             "/clear — очистить фотографии\n\n"
+            "После /publish или /schedule "
+            "бот попросит описание.\n\n"
             "🕐 Время — московское (МСК)."
         )
 
@@ -774,9 +927,68 @@ def process_update(
             chat_id
         )
 
+        waiting_for_description.discard(
+            chat_id
+        )
+
+        pending_schedule_dates.pop(
+            chat_id,
+            None
+        )
+
         send_message(
             chat_id,
-            "🗑 Фотографии очищены."
+            "🗑 Фотографии и данные публикации "
+            "очищены."
+        )
+
+        return
+
+
+    # =====================================================
+    # SKIP DESCRIPTION
+    # =====================================================
+
+    if text == "/skip":
+
+        if chat_id not in waiting_for_description:
+
+            send_message(
+                chat_id,
+                "ℹ️ Сейчас описание не запрашивается."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Описание для обычной публикации
+        # -------------------------------------------------
+
+        if chat_id not in pending_schedule_dates:
+
+            publish_with_description(
+                chat_id,
+                ""
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Описание для запланированной публикации
+        # -------------------------------------------------
+
+        date_text = pending_schedule_dates.get(
+            chat_id
+        )
+
+        waiting_for_description.discard(
+            chat_id
+        )
+
+        schedule_carousel(
+            chat_id,
+            date_text,
+            ""
         )
 
         return
@@ -846,6 +1058,117 @@ def process_update(
 
 
     # =====================================================
+    # WAITING FOR SCHEDULE DATE
+    # =====================================================
+
+    if chat_id in waiting_for_schedule:
+
+        try:
+
+            local_dt = datetime.strptime(
+                text.strip(),
+                "%d.%m.%Y %H:%M"
+            )
+
+            local_dt = local_dt.replace(
+                tzinfo=MOSCOW
+            )
+
+            utc_dt = local_dt.astimezone(
+                timezone.utc
+            )
+
+        except ValueError:
+
+            send_message(
+                chat_id,
+                "❌ Неверный формат даты.\n\n"
+                "Используй:\n"
+                "03.09.2026 18:30"
+            )
+
+            return
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        if utc_dt <= now:
+
+            send_message(
+                chat_id,
+                "❌ Это время уже прошло.\n\n"
+                "Укажи будущую дату и время."
+            )
+
+            return
+
+        waiting_for_schedule.discard(
+            chat_id
+        )
+
+        pending_schedule_dates[chat_id] = text
+
+        waiting_for_description.add(
+            chat_id
+        )
+
+        send_message(
+            chat_id,
+            "📝 Теперь напиши описание "
+            "к публикации.\n\n"
+            "Оно будет размещено под "
+            "слайдшоу.\n\n"
+            "Если описание не нужно — "
+            "напиши /skip"
+        )
+
+        return
+
+
+    # =====================================================
+    # WAITING FOR DESCRIPTION
+    # =====================================================
+
+    if chat_id in waiting_for_description:
+
+        description = text
+
+        # -------------------------------------------------
+        # Описание для запланированной публикации
+        # -------------------------------------------------
+
+        if chat_id in pending_schedule_dates:
+
+            date_text = pending_schedule_dates.get(
+                chat_id
+            )
+
+            waiting_for_description.discard(
+                chat_id
+            )
+
+            schedule_carousel(
+                chat_id,
+                date_text,
+                description
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Описание для публикации сейчас
+        # -------------------------------------------------
+
+        publish_with_description(
+            chat_id,
+            description
+        )
+
+        return
+
+
+    # =====================================================
     # PUBLISH NOW
     # =====================================================
 
@@ -865,44 +1188,8 @@ def process_update(
 
             return
 
-        success = publish_carousel(
-            photo_list
-        )
-
-        if success:
-
-            user_photos[chat_id] = []
-
-            send_message(
-                chat_id,
-                "✅ Карусель опубликована."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "❌ Не удалось опубликовать "
-                "карусель.\n\n"
-                "Подробная ошибка есть в логах Render."
-            )
-
-        return
-
-
-    # =====================================================
-    # WAITING FOR DATE
-    # =====================================================
-
-    if chat_id in waiting_for_schedule:
-
-        waiting_for_schedule.discard(
+        ask_for_description(
             chat_id
-        )
-
-        schedule_carousel(
-            chat_id,
-            text
         )
 
         return
@@ -973,6 +1260,11 @@ def run_bot():
 
     print(
         "Native Telegram Rich Slideshow",
+        flush=True
+    )
+
+    print(
+        "Description support: ON",
         flush=True
     )
 
